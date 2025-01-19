@@ -15,70 +15,110 @@ Methods:
 """
 import docker
 from docker.models.containers import Container
-
-from typing import List, Dict, Any, Tuple, Union, Optional
+from swebench.harness.docker_build import build_container, build_env_images, build_instance_image
+from swebench.harness.test_spec.test_spec import TestSpec
+from typing import List, Self, Union, Optional
 from exceptions import CommandFailedException
 import logging
+from utils import get_logger
+from uuid import uuid4
 
 
 class Environment:
     def __init__(
         self,
-        repo: str,
-        base_commit: str,
-        build_commands: Optional[Union[str, List[str]]] = None,
-        setup_commands: Optional[Union[str, List[str]]] = None,
-        base_image: str = "ubuntu:22.04",
-        logger: logging.Logger = logging.getLogger(__name__)
+        base_image: str,
+        workdir: str = "/testbed",
+        container: Optional[Container] = None,
+        docker_client: Optional[docker.client.DockerClient] = None,
+        logger: logging.Logger = get_logger(__name__),
     ):
-        self.repo = repo
-        self.base_commit = base_commit
-        # should depend on base image
-        self.build_commands = build_commands or [["apt", "update"], ["apt", "install", "-y", "git", "python3", "python3-pip"]]
-        self.setup_commands = setup_commands or [["pip", "install", "-e", "."]]
-        self.docker = docker.client.from_env()
+        self.docker = docker_client or docker.client.from_env()
         self.base_image = base_image
         # todo: abstract this to utils
         self.logger = logger
         self.logger.setLevel(logging.INFO)
 
-        self.workdir = f"/{repo.split('/')[-1]}"
-        self._container = self._setup_container()
+        self.workdir = workdir
+        self.container = container or self.docker.containers.run(self.base_image, detach=True, tty=True, stdin_open=True)
+
+    @classmethod
+    def from_test_spec(cls, test_spec: TestSpec, run_id: str, **kwargs) -> Self:
+        docker_client = kwargs.get("client", docker.client.from_env())
+        logger = kwargs.get("logger", get_logger(__name__))
+        force_rebuild = kwargs.get("force_rebuild", False)
+
+        # logger.info(f"Building instance image: {test_spec.instance_image_key}")
+        # build_instance_image(test_spec, docker_client, None, kwargs.get("nocache", False))
+
+        if test_spec.get_instance_container_name(run_id) in [c.name for c in docker_client.containers.list(all=True)]:
+            logger.info(f"Container {test_spec.get_instance_container_name(run_id)} already exists. Removing and re-creating.")
+            docker_client.containers.get(test_spec.get_instance_container_name(run_id)).remove(force=True)
+
+        logger.info(f"Building container: {test_spec.get_instance_container_name(run_id)}")
+        # container = build_container(
+        #     test_spec=test_spec,
+        #     client=docker_client,
+        #     run_id=run_id,
+        #     logger=logger,
+        #     nocache=kwargs.get("nocache", False),
+        #     force_rebuild=force_rebuild,
+        # )
+        # container.start()
+        # Define arguments for running the container
+        run_args = test_spec.docker_specs.get("run_args", {})
+        cap_add = run_args.get("cap_add", [])
+
+        logger.info(f"Running container: {test_spec.get_instance_container_name(run_id)}")
+        container = docker_client.containers.run(
+            image=test_spec.instance_image_key,
+            command="tail -f /dev/null",
+            name=test_spec.get_instance_container_name(run_id),
+            detach=True,
+            tty=True,
+            stdin_open=True,
+            platform=test_spec.platform,
+            cap_add=cap_add,
+        )
+
+        return cls(
+            base_image=test_spec.instance_image_key,
+            workdir="/testbed",
+            container=container,
+            docker_client=docker_client,
+            logger=kwargs.get("logger", get_logger(__name__)),
+        )
 
     def __del__(self):
         self._teardown()
 
-    def _setup_container(self) -> Container:
-        # get container
-        container = self.docker.containers.run(self.base_image, detach=True, tty=True, stdin_open=True)
-        for command in self.build_commands:
-            _, logs = container.exec_run(command)
-            self.logger.info(logs)
-        # clone repo
-        _, logs = container.exec_run(["git", "clone", f"https://github.com/{self.repo}.git", self.workdir])
-        self.logger.info(logs)
-        # checkout base commit
-        _, logs = container.exec_run(["git", "checkout", f"{self.base_commit}"], workdir=self.workdir)
-        self.logger.info(logs)
-        # build via setup_commands
-        for command in self.setup_commands:
-            _, logs = container.exec_run(command, workdir=self.workdir)
-            self.logger.info(logs)
-        return container
-
     def _teardown(self):
         # stop & remove container
-        self._container.stop()
-        self._container.remove()
+        if self.container.status == "running":
+            self.container.stop()
+            self.container.remove()
+
+    def reset(self):
+        # self.container.stop()
+        # self.container.remove()
+        # self.container = self.docker.containers.run(self.base_image, detach=True, tty=True, stdin_open=True)
+        # todo: fix this - address the case where the container was provided externally
+        raise NotImplementedError("Reset not implemented for Environment")
 
     def execute_command(self, command: Union[str, List[str]], ignore_errors: bool = False, **kwargs) -> str:
         """Runs a docker exec command and returns the logs, if available"""
         workdir = kwargs.pop("workdir", self.workdir)
         # run command in docker
-        exit_code, output_bytes = self._container.exec_run(command, workdir=workdir, **kwargs)
+        exit_code, output_bytes = self.container.exec_run(command, workdir=workdir, **kwargs)
         output = output_bytes.decode("utf-8")
         # return output
         if exit_code != 0 and not ignore_errors:
             raise CommandFailedException(command, output)
         return output
 
+    def ls(self, directory: Optional[str] = None):
+        return self.execute_command(f"ls {directory or ''}")
+
+    def get_patch(self):
+        self.execute_command(["git", "add", "."])
+        return self.execute_command(["git", "diff", "--cached"])

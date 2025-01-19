@@ -1,6 +1,7 @@
 from environment import Environment
 from linter import Flake8Linter
 from editor import Editor
+from swebench_utils import build_swebench_images
 
 
 def test_environment():
