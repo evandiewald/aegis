@@ -1,7 +1,7 @@
 
 
 # max. number of files to return in the search
-MAX_FILE_SEARCH_RESULTS = 5
+MAX_FILE_SEARCH_RESULTS = 10
 # number of lines above and below the focus line to show in the editor view
-WINDOW_BUFFER = 50
+WINDOW_BUFFER = (5, 95)
 

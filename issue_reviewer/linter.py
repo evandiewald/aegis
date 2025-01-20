@@ -28,7 +28,7 @@ class BaseLinter:
             return None
         except CommandFailedException as e:
             # don't want to raise it, but return the results
-            return str(LintingFailedException(e.command, e.output))
+            return e.output
 
 
 class Flake8Linter(BaseLinter):

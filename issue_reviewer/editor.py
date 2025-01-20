@@ -9,9 +9,10 @@ from environment import Environment
 from linter import BaseLinter, Flake8Linter
 import configuration as cf
 
-from typing import Literal, Optional, TypedDict
+from typing import Tuple, Optional, TypedDict
 import os
 import base64
+import re
 
 
 class CurrentWindow(TypedDict):
@@ -24,7 +25,7 @@ class Editor:
         self,
         env: Environment,
         linter: Optional[BaseLinter] = Flake8Linter(),
-        window_buffer: int = cf.WINDOW_BUFFER,
+        window_buffer: Tuple[int, int] = cf.WINDOW_BUFFER,
     ):
         self.env = env
         self.linter = linter
@@ -39,16 +40,34 @@ class Editor:
     def _read_file(self, file_path: str) -> str:
         return self.env.execute_command(["cat", file_path])
 
-    def _write_file(self, file_path: str, content: str):
-        # base64 encoding helps ensure quotes are formatted properly
-        content_b64 = base64.b64encode(content.encode()).decode()
-        command = f'bash -c "echo "{content_b64}" | base64 -d > "{file_path}""'
-        self.env.execute_command(command)
+    # def _write_file(self, file_path: str, content: str):
+    #     # base64 encoding helps ensure quotes are formatted properly
+    #     content_b64 = base64.b64encode(content.encode()).decode()
+    #     command = f'bash -c "echo "{content_b64}" | base64 -d > "{file_path}""'
+    #     self.env.execute_command(command)
+
+    def _write_file(self, file_path: str, content: str, chunk_size: int = 1024):  # 1KB chunks by default
+        # First, truncate/create the file
+        self.env.execute_command(f'bash -c "true > "{file_path}""')
+        
+        # Convert the entire content to bytes
+        content_bytes = content.encode()
+        
+        # Process the content in chunks
+        for i in range(0, len(content_bytes), chunk_size):
+            chunk = content_bytes[i:i + chunk_size]
+            chunk_b64 = base64.b64encode(chunk).decode()
+            
+            # Append each chunk to the file using >>
+            command = f'bash -c "echo "{chunk_b64}" | base64 -d >> "{file_path}""'
+            self.env.execute_command(command)
 
     def _lint_file(self, file_path: str) -> Optional[str]:
         if not self.linter:
             return None
         return self.linter.lint(file_path, self.env)
+    
+    # todo: maybe an opportunity to revert files or "undo" last action, e.g. if a change was made but it did not resolve the issue?
 
     def search_files(self, filename: str, directory: str = ".") -> str:
         """Searches for files in the given directory with the given filename"""
@@ -71,22 +90,24 @@ class Editor:
         # todo: support other languages - treesitter?
         # search for references to the class/function
         references_results = self.env.execute_command(["grep", "-Irn", f"{search_term}", path]).splitlines()
-        if (num_results := len(references_results)) == 0:
-            res = f"\nNo references found for {search_term} at path: {path}."
+        num_results = len(references_results)
+        if num_results == 0:
+            res = f"\nNo references found for `{search_term}` at path: {path}"
         elif num_results == 1:
-            res = f"\nFound reference to {search_term} at path {path}:\n{references_results[0]}"
+            res = f"\nFound 1 reference to `{search_term}` at path {path}:\n{references_results[0]}"
         else:
-            res = (f"\nFound references to {search_term} in directory {path}:\n" +
+            res = (f"\nFound {num_results} references to `{search_term}` in directory {path}:\n" +
                     "\n".join(references_results[:cf.MAX_FILE_SEARCH_RESULTS]) +
                     f"\n...{num_results-cf.MAX_FILE_SEARCH_RESULTS} more (try narrowing your search with the `path` arg)") \
                 if num_results > cf.MAX_FILE_SEARCH_RESULTS else ""
         return res
-
-    def open_file(self, file_path: str, line_number: int = 1) -> str:
-        """Opens a file to a specific line. Once open, you can scroll_up or scroll_down"""
+    
+    def view_file(self, file_path: str, line_number: int = 1) -> Tuple[str, int]:
+        """View a file contents without setting the current_window"""
         file_lines = [f"{idx+1}: {line}" for idx, line in enumerate(self._read_file(file_path).splitlines())]
-        start_line = max(0, line_number-self.window_buffer)
-        end_line = min(len(file_lines), line_number+self.window_buffer)
+        line_number = min(len(file_lines), line_number)
+        start_line = max(0, line_number-self.window_buffer[0])
+        end_line = min(len(file_lines), line_number+self.window_buffer[1])
 
         result = f"Opened file: {file_path}\n"
         if start_line > 0:
@@ -94,6 +115,15 @@ class Editor:
         result += "\n".join(file_lines[start_line:end_line])
         if end_line < len(file_lines):
             result += f"\n...{len(file_lines)-end_line} lines below..."
+        else:
+            result += f"\n--You've reached the end of the file--"
+        # return the annotated editor "window" and the adjusted line_number
+        return result, line_number
+
+    def open_file(self, file_path: str, line_number: int = 1) -> str:
+        """Opens a file to a specific line. Once open, you can scroll_up or scroll_down"""
+        # if line_number > len(file), it will be adjusted accordingly by view_file
+        result, line_number = self.view_file(file_path, line_number)
         # set the current window to enable scrolling
         self.current_window = {
             "file_path": file_path,
@@ -108,7 +138,7 @@ class Editor:
         """
         if not self.current_window:
             return "No file currently open. Use the `open_file(file_path, line_number)` function to open a file first."
-        return self.open_file(self.current_window["file_path"], self.current_window["line_number"] - self.window_buffer*2+1)
+        return self.open_file(self.current_window["file_path"], self.current_window["line_number"] - sum(self.window_buffer)+1)
 
     def scroll_down(self):
         """
@@ -117,7 +147,7 @@ class Editor:
         """
         if not self.current_window:
             return "No file currently open. Use the `open_file(file_path, line_number)` function to open a file first."
-        return self.open_file(self.current_window["file_path"], self.current_window["line_number"] + self.window_buffer*2-1)
+        return self.open_file(self.current_window["file_path"], self.current_window["line_number"] + sum(self.window_buffer)-1)
 
     def edit_file(
         self,
@@ -142,22 +172,44 @@ class Editor:
             file_lines = self._read_file(file_path).splitlines()
             file_lines[start_line-1:end_line] = new_content.splitlines()
 
-        updated_file = "\n".join(file_lines)
-        if not self.linter:
+        updated_content = "\n".join(file_lines)
+        if not self.linter or not file_path.endswith(".py"):
             # write the new file contents to the original file
-            self._write_file(file_path, updated_file)
+            self._write_file(file_path, updated_content)
             return f"File {file_path} updated successfully."
         else:
+            # sometimes the files have linting issues before we even make a change
+            # capture the error messages - the lines might change after the edit
+            existing_errors = []
+            if not is_new_file:
+                existing_lint_msg = self._lint_file(file_path)
+                if existing_lint_msg:
+                    for lint_msg in existing_lint_msg.splitlines():
+                        match = re.search(r'(?:[^:]+:){2}\s*\w+\s+(.+)', lint_msg)
+                        if match:
+                            existing_errors.append(match.group(1))
+
             # write the new file contents to a temporary file
             tmp_file = f"/tmp/{os.path.basename(file_path)}"
-            self._write_file(tmp_file, updated_file)
+            self._write_file(tmp_file, updated_content)
             # linting - replace tmp path with eventual path
             lint_error = self._lint_file(tmp_file)
-            if lint_error:
-                return f"Failed to {'create' if is_new_file else 'update'} file {file_path} due to linting errors:\n\n{lint_error.replace(tmp_file, file_path)}"
+            new_errors = [e for e in lint_error.splitlines() if not any([pe in e for pe in existing_errors])] if lint_error else []
+            if new_errors:
+                # filter out errors that were present before the edit
+                lint_msg = "\n".join(new_errors)
+                return f"""Failed to {'create' if is_new_file else 'update'} file {file_path} due to linting errors:
+                
+{lint_msg.replace(tmp_file, file_path)}
+
+Here is the relevant portion of code:
+
+{self.view_file(tmp_file, line_number=start_line)[0]}
+
+Check your indentation and revise with different `new_content`."""
             else:
                 # write the new file contents to the original file
-                self._write_file(file_path, updated_file)
+                self._write_file(file_path, updated_content)
                 return f"File {file_path} {'created' if is_new_file else 'updated'} successfully."
 
     def rm(self, file_path: str):

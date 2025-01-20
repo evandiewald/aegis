@@ -173,3 +173,4 @@ cython_debug/
 .playground
 .vectorstores
 results
+logs/
