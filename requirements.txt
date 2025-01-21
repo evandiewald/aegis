@@ -196,7 +196,7 @@ soupsieve==2.6
 SQLAlchemy==2.0.37
 stack-data==0.6.3
 starlette==0.41.3
-swebench @ git+https://github.com/swe-bench/SWE-bench.git@715f8591c6233a07354e9d32b38458ecb8ab4166
+swebench @ git+https://github.com/swe-bench/SWE-bench.git@c63a11369d6e2d5c2d11d8cdd50d2e39f93d9f3d
 sympy==1.13.3
 synchronicity==0.9.8
 tenacity==9.0.0

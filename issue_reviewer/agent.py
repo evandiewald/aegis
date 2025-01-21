@@ -14,20 +14,21 @@ from utils import get_logger
 from langchain_aws import ChatBedrockConverse
 from langgraph.prebuilt.tool_node import ToolNode
 from langgraph.graph import StateGraph, MessagesState, START, END
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 import prompt_templates as pt
-from utils import save_result
+from utils import save_result, get_media_type_for_extension
+import config as cf
 
 from dotenv import load_dotenv
 from botocore.config import Config
 from typing import Annotated, List, Dict, Optional
-from concurrent.futures import ProcessPoolExecutor
-from functools import partial
 import operator
-from tqdm import tqdm
 import logging
 import time
+import httpx
+import base64
 
 import argparse
 import os
@@ -46,6 +47,7 @@ def parse_args():
     parser.add_argument("--run-id", type=str, required=True)
     parser.add_argument("--max-workers", type=int, default=os.cpu_count())
     parser.add_argument("--start-from-idx", type=int)
+    parser.add_argument("--recursion-limit", type=int, default=cf.RECURSION_LIMIT)
     return parser.parse_args()
 
 
@@ -73,9 +75,16 @@ def build_images(
 
 
 # create environment
-def run_instance(instance_details: SWEbenchInstance, run_id: str, logger: logging.Logger):
+def run_instance(
+    instance_details: SWEbenchInstance, 
+    run_id: str, 
+    logger: logging.Logger,
+    recursion_limit: int,
+):
 
     test_spec = make_test_spec(instance_details)
+
+    # context manager for graceful deletion
     with Environment.from_test_spec(
         test_spec=test_spec,
         run_id=run_id,
@@ -85,16 +94,15 @@ def run_instance(instance_details: SWEbenchInstance, run_id: str, logger: loggin
         code_editor = Editor(env)
 
         llm = ChatBedrockConverse(
-            model="us.anthropic.claude-3-5-sonnet-20240620-v1:0",
-            # model="us.amazon.nova-pro-v1:0",
+            model=cf.BEDROCK_MODEL_ID,
             config=Config(
                 retries={
                     "mode": "adaptive",
-                    "max_attempts": 1000,
+                    "max_attempts": cf.BOTO3_MAX_ATTEMPTS,
                 },
             ),
             region_name=os.getenv("AWS_REGION", "us-east-1"),
-            temperature=0.2,
+            temperature=cf.MODEL_TEMPERATURE,
         )
 
         def submit():
@@ -115,25 +123,50 @@ def run_instance(instance_details: SWEbenchInstance, run_id: str, logger: loggin
             submit
         ]
 
-        llm_with_tools = llm.bind_tools(tools).with_retry(stop_after_attempt=10)
+        llm_with_tools = llm.bind_tools(tools).with_retry(stop_after_attempt=cf.LANGCHAIN_STOP_AFTER_ATTEMPT)
 
         class CodeReviewerState(MessagesState):
             patch: str
             trajectory: Annotated[List[str], operator.add]
+            edited_files: List[str]
+            removed_files: List[str]
 
         def assistant(state: CodeReviewerState):
+            
+            prompt_template = ChatPromptTemplate([
+                ("system", pt.AGENT_INSTRUCTIONS_NO_REPRODUCE),
+                MessagesPlaceholder("messages")
+            ])
+
+            chain = prompt_template | llm_with_tools
             # todo: collapse messages efficiently - e.g. remove failed tool calls
-            next_message = llm_with_tools.invoke([pt.AGENT_INSTRUCTIONS_NO_REPRODUCE] + state["messages"])
+            next_message = chain.invoke({"messages": state["messages"]})
+
+            # track edited files if `edit_file` tool was called
+            edited_files, removed_files = state.get("edited_files", []), state.get("removed_files", [])
+            for message in state["messages"]:
+                if isinstance(message, AIMessage):
+                    for tc in message.tool_calls:
+                        if tc["name"] == "edit_file":
+                            # stage changed files
+                            if (file_path := tc["args"]["file_path"]) not in edited_files:
+                                edited_files.append(file_path)
+                        elif tc["name"] == "rm":
+                            # removed files
+                            if (file_path := tc["args"]["file_path"]) not in removed_files:
+                                removed_files.append(file_path)
+
             return {
                 "messages": [next_message],
-                "trajectory": [next_message.pretty_repr()]
+                "trajectory": [next_message.pretty_repr()],
+                "edited_files": edited_files,
+                "removed_files": removed_files,
             }
 
         def get_patch(state: CodeReviewerState):
-            # if the agent created a temp file and forgot to delete it
-            if code_editor._file_exists("reproduce_issue.py"):
-                code_editor.rm("reproduce_issue.py")
-            patch = env.get_patch()
+            # unique set of files that were edited and not removed by the agent
+            edited_files = list(set(filter(lambda x: x not in state["removed_files"] + ["reproduce_issue.py"], state["edited_files"])))
+            patch = env.get_patch(edited_files)
             return {"patch": patch}
 
         def route_messages(state: CodeReviewerState):
@@ -161,18 +194,39 @@ def run_instance(instance_details: SWEbenchInstance, run_id: str, logger: loggin
         workflow.add_edge("get_patch", END)
         graph = workflow.compile()
 
-        messages = [
-            HumanMessage(
-                content=pt.START_AGENT.format(
+        message_content = [
+            {
+                "type": "text", 
+                "text": pt.START_AGENT.format(
                     repo=instance_details["repo"],
                     problem_statement=instance_details["problem_statement"],
                 )
-            )
+            },
+        ]
+        
+        # multimodal inputs
+        if "image_assets" in instance_details:
+            for img_url in instance_details["image_assets"]["problem_statement"]:
+                # if (extension := img_url.split(".")[-1]) in ["png", "jpg", "gif", "webp"]:
+                message_content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": get_media_type_for_extension(img_url.split(".")),
+                            "data": base64.b64encode(httpx.get(img_url).content).decode("utf-8"),
+                        },
+                    }
+                )
+
+        # input message
+        messages = [
+            HumanMessage(content=message_content)
         ]
 
         model_patch, trajectory, error = None, None, None
         try:
-            for chunk in graph.stream({"messages": messages}, {"recursion_limit": 40}, stream_mode="updates"):
+            for chunk in graph.stream({"messages": messages}, {"recursion_limit": recursion_limit}, stream_mode="updates"):
                 if "tool_node" in chunk:
                     logger.info(chunk["tool_node"]["messages"][-1].pretty_repr())
                 elif "assistant" in chunk:
@@ -187,13 +241,19 @@ def run_instance(instance_details: SWEbenchInstance, run_id: str, logger: loggin
         except Exception as e:
             error = str(e)
             logger.error(e)
-            model_patch = env.get_patch()
+            # TODO: update this for JS / multimodal - default path
+            model_patch = env.get_patch(["*.py"])
 
     return model_patch, trajectory, error
 
 
 def process_instance(
-    instance: SWEbenchInstance, run_id: str, dataset_id: str, model_name: str = "ai-review-agent"):
+    instance: SWEbenchInstance, 
+    run_id: str, 
+    dataset_id: str, 
+    model_name: str = "ai-review-agent", 
+    **kwargs,
+):
 
     logger = get_logger(
         __name__, 
@@ -201,13 +261,13 @@ def process_instance(
     )
 
     t_start = time.time()
-    model_patch, trajectory, error = run_instance(instance, run_id, logger=logger)
+    model_patch, trajectory, error = run_instance(instance, run_id, logger=logger, **kwargs)
 
     save_result(
         dataset_id,
         run_id,
         model_name_or_path=model_name,
-        instance_id=instance['instance_id'],
+        instance_id=instance["instance_id"],
         model_patch=model_patch,
         trajectory=trajectory,
         error=error,
@@ -224,26 +284,11 @@ if __name__ == "__main__":
         instance_ids=args.instance_ids, 
         start_from_idx=args.start_from_idx,
     )
-    
-    with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
-        # Create partial function with fixed arguments
-        process_func = partial(process_instance, run_id=args.run_id, dataset_id=args.dataset_id)
-        
-        # Submit all tasks and wrap with tqdm
-        futures = list(tqdm(
-            executor.map(process_func, instances),
-            total=len(instances)
-        ))
-    
-    # for instance in tqdm(instances):
-    #     t_start = time.time()
-    #     model_patch, trajectory, error = run_instance(instance, args.run_id, logger=logger)
-    #     save_result(
-    #         args.dataset_id,
-    #         args.run_id,
-    #         instance["instance_id"],
-    #         model_patch,
-    #         trajectory,
-    #         error,
-    #         time_sec=round(time.time() - t_start, 1),
-    #     )
+
+    for instance in instances:
+        process_instance(
+            instance,
+            run_id=args.run_id,
+            dataset_id=args.dataset_id,
+            recursion_limit=args.recursion_limit,
+        )

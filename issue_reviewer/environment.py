@@ -82,9 +82,6 @@ class Environment:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._teardown()
 
-    def __del__(self):
-        self._teardown()
-
     def _teardown(self):
         # stop & remove container
         if self.container.status in ["created", "running"]:
@@ -119,6 +116,10 @@ class Environment:
     def ls(self, directory: Optional[str] = None):
         return self.execute_command(f"ls {directory or ''}")
 
-    def get_patch(self):
-        self.execute_command(["git", "add", "."])
-        return self.execute_command(["git", "diff", "--cached"])
+    def get_patch(self, edited_files: Optional[List[str]] = None):
+        edited_files = edited_files or ["."]
+
+        # add
+        self.execute_command(["git", "add"] + edited_files)
+        # diff
+        return self.execute_command(["git", "diff", "--cached"] + edited_files)

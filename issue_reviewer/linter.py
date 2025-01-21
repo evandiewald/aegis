@@ -37,8 +37,6 @@ class Flake8Linter(BaseLinter):
             name="flake8",
             install_command=["pip", "install", "flake8"],
             lint_command=["flake8", "--isolated", "--select=F821,F822,F831,E111,E112,E113,E999,E902"]
-            # lint_command=["flake8", "--ignore=W292,E302,E305"],
         )
-
 
 

@@ -21,6 +21,12 @@ def build_swebench_images(
     dataset = load_swebench_dataset(dataset_id, split)
     dataset_subset = [i for i in dataset if i["instance_id"] in instance_ids]
 
+    # for multimodal dataset, certain fields are empty strings, which causes failures
+    for instance in dataset_subset:
+        for _key in ["FAIL_TO_PASS", "PASS_TO_PASS"]:
+            if instance[_key] == "":
+                instance[_key] = []
+
     successful, _ = build_instance_images(
         docker_client,
         dataset=dataset_subset,
@@ -28,9 +34,5 @@ def build_swebench_images(
         **kwargs,
     )
 
-    # return {
-    #     ts.instance_id: ts
-    #     for ts in get_test_specs_from_dataset(dataset_subset)
-    # }
     return successful
 

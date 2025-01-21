@@ -77,3 +77,11 @@ def save_result(
     check_parent(p)
     with open(traj_path, "w") as f:
         json.dump({"trajectory": trajectory}, f)
+
+
+def get_media_type_for_extension(extension: str) -> str:
+    if extension not in ["png", "jpg", "jpeg", "gif", "webp"]:
+        raise ValueError(f"Unknown extension for image data: {extension}")
+    # standardize jpeg
+    img_type = "jpeg" if extension == "jpg" else extension
+    return f"image/{img_type}"

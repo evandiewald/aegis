@@ -7,7 +7,7 @@ Constructed from the Environment class
 """
 from environment import Environment
 from linter import BaseLinter, Flake8Linter
-import configuration as cf
+import config as cf
 
 from typing import Tuple, Optional, TypedDict
 import os
@@ -39,12 +39,6 @@ class Editor:
 
     def _read_file(self, file_path: str) -> str:
         return self.env.execute_command(["cat", file_path])
-
-    # def _write_file(self, file_path: str, content: str):
-    #     # base64 encoding helps ensure quotes are formatted properly
-    #     content_b64 = base64.b64encode(content.encode()).decode()
-    #     command = f'bash -c "echo "{content_b64}" | base64 -d > "{file_path}""'
-    #     self.env.execute_command(command)
 
     def _write_file(self, file_path: str, content: str, chunk_size: int = 1024):  # 1KB chunks by default
         # First, truncate/create the file
@@ -104,6 +98,9 @@ class Editor:
         elif num_results == 1:
             res = f"\nFound 1 reference to `{search_term}` at path {path}:\n{references_results[0]}"
         else:
+            # push any files with `test` to the bottom of the list
+            references_results.sort(key=lambda x: "test" in x.lower())
+
             res = (f"\nFound {num_results} references to `{search_term}` in directory {path}:\n" +
                     "\n".join(references_results[:cf.MAX_FILE_SEARCH_RESULTS]))
             suffix = f"\n...{num_results-cf.MAX_FILE_SEARCH_RESULTS} more (try narrowing your search with the `path` arg)" if num_results > cf.MAX_FILE_SEARCH_RESULTS else ""
@@ -166,33 +163,42 @@ class Editor:
         start_line: int,
         end_line: int,
         new_content: str,
-    ) -> Optional[str]:
+    ) -> str:
         """
         Attempt to edit a file by passing the file_path of the file you want to change (or create),
         the start_line and end_line of the code block that needs to be updated, and the new_content
         you wish to update with. Be careful about spacing and indents in your new_content!
         The changes will be passed through a linter to ensure valid syntax.
         """
+        new_errors = None
         # create a new file if the provided path does not exist
         if not self._file_exists(file_path):
             is_new_file = True
             file_lines = new_content.splitlines()
+            updated_content = "\n".join(file_lines)
         else:
             # get the current file contents and update accordingly
             is_new_file = False
-            file_lines = self._read_file(file_path).splitlines()
+            original_end_line = end_line
+            original_file_lines = self._read_file(file_path).splitlines()
+            
+            # Store the original attempt for potential error message
+            file_lines = original_file_lines.copy()
             file_lines[start_line-1:end_line] = new_content.splitlines()
+            original_attempt = "\n".join(file_lines)
 
-        updated_content = "\n".join(file_lines)
-        if not self.linter or not file_path.endswith(".py"):
-            # write the new file contents to the original file
-            self._write_file(file_path, updated_content)
-            return f"File {file_path} updated successfully."
-        else:
-            # sometimes the files have linting issues before we even make a change
-            # capture the error messages - the lines might change after the edit
-            existing_errors = []
-            if not is_new_file:
+            # Try with incrementing end_line if needed
+            for retry in range(cf.MAX_RETRIES_EDIT_FILE):
+                current_end_line = end_line + retry
+                file_lines = original_file_lines.copy()
+                file_lines[start_line-1:current_end_line] = new_content.splitlines()
+                updated_content = "\n".join(file_lines)
+
+                if not self.linter or not file_path.endswith(".py"):
+                    break
+
+                # Check existing errors
+                existing_errors = []
                 existing_lint_msg = self._lint_file(file_path)
                 if existing_lint_msg:
                     for lint_msg in existing_lint_msg.splitlines():
@@ -200,17 +206,32 @@ class Editor:
                         if match:
                             existing_errors.append(match.group(1))
 
-            # write the new file contents to a temporary file
-            tmp_file = f"/tmp/{os.path.basename(file_path)}"
-            self._write_file(tmp_file, updated_content)
-            # linting - replace tmp path with eventual path
-            lint_error = self._lint_file(tmp_file)
-            new_errors = [e for e in lint_error.splitlines() if not any([pe in e for pe in existing_errors])] if lint_error else []
-            if new_errors:
-                # filter out errors that were present before the edit
-                lint_msg = "\n".join(new_errors)
-                return f"""Failed to {'create' if is_new_file else 'update'} file {file_path} due to linting errors:
+                # Test the current attempt
+                tmp_file = f"/tmp/{os.path.basename(file_path)}"
+                self._write_file(tmp_file, updated_content)
+                lint_error = self._lint_file(tmp_file)
+                new_errors = [e for e in lint_error.splitlines() if not any([pe in e for pe in existing_errors])] if lint_error else []
                 
+                if not new_errors:
+                    # Found a working solution
+                    break
+                
+                if retry == cf.MAX_RETRIES_EDIT_FILE - 1:
+                    # If we've exhausted all retries, use the original attempt for the error message
+                    updated_content = original_attempt
+                    current_end_line = original_end_line
+                    tmp_file = f"/tmp/{os.path.basename(file_path)}"
+                    self._write_file(tmp_file, updated_content)
+                    lint_error = self._lint_file(tmp_file)
+                    new_errors = [e for e in lint_error.splitlines() if not any([pe in e for pe in existing_errors])] if lint_error else []
+
+        if not self.linter or not file_path.endswith(".py"):
+            self._write_file(file_path, updated_content)
+            return f"File {file_path} updated successfully."
+        elif new_errors:
+            lint_msg = "\n".join(new_errors)
+            return f"""Failed to {'create' if is_new_file else 'update'} file {file_path} due to linting errors:
+            
 {lint_msg.replace(tmp_file, file_path)}
 
 Here is the relevant portion of code:
@@ -218,10 +239,9 @@ Here is the relevant portion of code:
 {self.view_file(tmp_file, line_number=start_line)[0]}
 
 Check your indentation / line numbers and revise with different `new_content`."""
-            else:
-                # write the new file contents to the original file
-                self._write_file(file_path, updated_content)
-                return f"File {file_path} {'created' if is_new_file else 'updated'} successfully."
+        else:
+            self._write_file(file_path, updated_content)
+            return f"File {file_path} {'created' if is_new_file else 'updated'} successfully."
 
     def rm(self, file_path: str):
         """Removes a file from the environment"""
@@ -240,7 +260,14 @@ Check your indentation / line numbers and revise with different `new_content`.""
 
     def run_python_file(self, file_path: str):
         """Runs a python file in the environment"""
-        return self.env.execute_command(["conda", "run", "-n", "testbed", "python3", file_path], ignore_errors=True)
+        output = self.env.execute_command(["conda", "run", "-n", "testbed", "python3", file_path], ignore_errors=True)
+        # trim the output - some modules, like sphinx, have incredibly long outputs
+        output_lines = output.splitlines()
+        if len(output_lines) > cf.MAX_OUTPUT_LINES:
+            output = "\n".join(output_lines[:cf.MAX_OUTPUT_LINES // 2]) + \
+                "\n[...logs trimmed...]\n" + \
+                "\n".join(output_lines[-cf.MAX_OUTPUT_LINES // 2:])
+        return output
 
     def reset(self):
         """Resets the editor to its initial state"""
