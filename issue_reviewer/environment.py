@@ -31,6 +31,7 @@ class Environment:
         container: Optional[Container] = None,
         docker_client: docker.client.DockerClient = docker.client.from_env(),
         logger: logging.Logger = get_logger(__name__),
+        timeout: int = 30,
     ):
         self.docker = docker_client or docker.client.from_env()
         self.base_image = base_image
@@ -38,13 +39,14 @@ class Environment:
         self.logger = logger
         self.logger.setLevel(logging.INFO)
 
+        self.timeout = timeout
         self.workdir = workdir
         self.container = container or self.docker.containers.run(self.base_image, detach=True, tty=True, stdin_open=True)
 
     @classmethod
     def from_test_spec(cls, test_spec: TestSpec, run_id: str, **kwargs) -> Self:
-        docker_client = kwargs.get("client", docker.client.from_env())
-        logger = kwargs.get("logger", get_logger(__name__))
+        docker_client = kwargs.pop("docker_client", docker.client.from_env())
+        logger = kwargs.pop("logger", get_logger(__name__))
 
         if test_spec.get_instance_container_name(run_id) in [c.name for c in docker_client.containers.list(all=True)]:
             logger.info(f"Container {test_spec.get_instance_container_name(run_id)} already exists. Removing and re-creating.")
@@ -71,6 +73,7 @@ class Environment:
             container=container,
             docker_client=docker_client,
             logger=logger,
+            **kwargs,
         )
     
     def __enter__(self):
@@ -97,9 +100,17 @@ class Environment:
     def execute_command(self, command: Union[str, List[str]], ignore_errors: bool = False, **kwargs) -> str:
         """Runs a docker exec command and returns the logs, if available"""
         workdir = kwargs.pop("workdir", self.workdir)
+        timeout = kwargs.pop("timeout", self.timeout)
         # run command in docker
+        if isinstance(command, str):
+            command = f"timeout {timeout} {command}"
+        elif isinstance(command, list):
+            command = ["timeout", f"{timeout}"] + command
         exit_code, output_bytes = self.container.exec_run(command, workdir=workdir, **kwargs)
         output = output_bytes.decode("utf-8")
+        # check for timeouts
+        if exit_code == 124:
+            output += f"\nCommand timed out after {timeout} seconds."
         # return output
         if exit_code != 0 and not ignore_errors:
             raise CommandFailedException(command, output)

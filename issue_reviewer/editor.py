@@ -72,16 +72,23 @@ class Editor:
     def search_files(self, filename: str, directory: str = ".") -> str:
         """Searches for files in the given directory with the given filename"""
         results = self.env.execute_command(["find", directory, "-name", filename]).splitlines()
-        if (num_results := len(results)) == 0:
-            return f"No results found for file {filename} in directory {directory}."
+        num_results = len(results)
+        if num_results == 0:
+            # expand the search
+            results = self.env.execute_command(["find", directory, "-name", f"*{filename}"]).splitlines()
+            num_results = len(results)
+        # if still nothing
+        if num_results == 0:
+            return f"No results found for file {filename} in directory {directory}"
         elif num_results == 1:
             return f"Found file {filename} in directory {directory}: {results[0]}"
         else:
-            return (f"Found {num_results} files matching {filename} in directory {directory}:\n" +
-                    "\n".join(results[:cf.MAX_FILE_SEARCH_RESULTS]) +
-                    f"\n...{num_results-cf.MAX_FILE_SEARCH_RESULTS} more (try narrowing your search)") \
+            res = (f"Found {num_results} files matching {filename} in directory {directory}:\n" +
+                    "\n".join(results[:cf.MAX_FILE_SEARCH_RESULTS]))
+            suffix = f"\n...{num_results-cf.MAX_FILE_SEARCH_RESULTS} more (try narrowing your search)" \
                 if num_results > cf.MAX_FILE_SEARCH_RESULTS else ""
-
+            return res + suffix
+                    
     def code_search(self, search_term: str, path: str = "."):
         """
         Returns references of a specific term (e.g. a class or function).
@@ -89,7 +96,8 @@ class Editor:
         """
         # todo: support other languages - treesitter?
         # search for references to the class/function
-        references_results = self.env.execute_command(["grep", "-Irn", f"{search_term}", path]).splitlines()
+        # only searching .py files for now
+        references_results = self.env.execute_command(["grep", "-Irn", "--include=*.py", f"{search_term}", path], ignore_errors=True).splitlines()
         num_results = len(references_results)
         if num_results == 0:
             res = f"\nNo references found for `{search_term}` at path: {path}"
@@ -97,9 +105,9 @@ class Editor:
             res = f"\nFound 1 reference to `{search_term}` at path {path}:\n{references_results[0]}"
         else:
             res = (f"\nFound {num_results} references to `{search_term}` in directory {path}:\n" +
-                    "\n".join(references_results[:cf.MAX_FILE_SEARCH_RESULTS]) +
-                    f"\n...{num_results-cf.MAX_FILE_SEARCH_RESULTS} more (try narrowing your search with the `path` arg)") \
-                if num_results > cf.MAX_FILE_SEARCH_RESULTS else ""
+                    "\n".join(references_results[:cf.MAX_FILE_SEARCH_RESULTS]))
+            suffix = f"\n...{num_results-cf.MAX_FILE_SEARCH_RESULTS} more (try narrowing your search with the `path` arg)" if num_results > cf.MAX_FILE_SEARCH_RESULTS else ""
+            res = res + suffix
         return res
     
     def view_file(self, file_path: str, line_number: int = 1) -> Tuple[str, int]:
@@ -122,14 +130,17 @@ class Editor:
 
     def open_file(self, file_path: str, line_number: int = 1) -> str:
         """Opens a file to a specific line. Once open, you can scroll_up or scroll_down"""
-        # if line_number > len(file), it will be adjusted accordingly by view_file
-        result, line_number = self.view_file(file_path, line_number)
-        # set the current window to enable scrolling
-        self.current_window = {
-            "file_path": file_path,
-            "line_number": line_number,
-        }
-        return result
+        if self._file_exists(file_path):
+            # if line_number > len(file), it will be adjusted accordingly by view_file
+            result, line_number = self.view_file(file_path, line_number)
+            # set the current window to enable scrolling
+            self.current_window = {
+                "file_path": file_path,
+                "line_number": line_number,
+            }
+            return result
+        else:
+            return f"File {file_path} does not exist."
 
     def scroll_up(self):
         """
@@ -206,7 +217,7 @@ Here is the relevant portion of code:
 
 {self.view_file(tmp_file, line_number=start_line)[0]}
 
-Check your indentation and revise with different `new_content`."""
+Check your indentation / line numbers and revise with different `new_content`."""
             else:
                 # write the new file contents to the original file
                 self._write_file(file_path, updated_content)

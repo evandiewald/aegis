@@ -21,7 +21,7 @@ from utils import save_result
 
 from dotenv import load_dotenv
 from botocore.config import Config
-from typing import Annotated, List, Dict
+from typing import Annotated, List, Dict, Optional
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 import operator
@@ -45,14 +45,23 @@ def parse_args():
     parser.add_argument("--instance-ids", nargs="+", type=str, required=True)
     parser.add_argument("--run-id", type=str, required=True)
     parser.add_argument("--max-workers", type=int, default=os.cpu_count())
+    parser.add_argument("--start-from-idx", type=int)
     return parser.parse_args()
 
 
-def build_images(dataset_id, split, instance_ids, tag="latest") -> List[Dict]:
+def build_images(
+    dataset_id: str, 
+    split: str, 
+    instance_ids: List[str], 
+    tag: str = "latest", 
+    start_from_idx: Optional[int] = None,
+) -> List[Dict]:
 
     dataset = load_dataset(dataset_id, split=split)
     if "all" in instance_ids:
         instance_ids = [r["instance_id"] for r in dataset]
+    # option to skip ahead
+    instance_ids = instance_ids[start_from_idx:]# if start_from_idx else instance_ids
     # base -> environment -> instance images
     build_swebench_images(
         dataset_id, split,
@@ -85,6 +94,7 @@ def run_instance(instance_details: SWEbenchInstance, run_id: str, logger: loggin
                 },
             ),
             region_name=os.getenv("AWS_REGION", "us-east-1"),
+            temperature=0.2,
         )
 
         def submit():
@@ -209,7 +219,10 @@ if __name__ == "__main__":
     args = parse_args()
 
     instances = build_images(
-        args.dataset_id, args.split, args.instance_ids
+        dataset_id=args.dataset_id, 
+        split=args.split, 
+        instance_ids=args.instance_ids, 
+        start_from_idx=args.start_from_idx,
     )
     
     with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
