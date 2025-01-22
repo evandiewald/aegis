@@ -107,7 +107,7 @@ def run_instance(
 
         def submit():
             """Submit your changes once complete."""
-            return env.get_patch()
+            pass
 
         tools = [
             code_editor.open_file,
@@ -116,11 +116,14 @@ def run_instance(
             code_editor.ls,
             code_editor.search_files,
             code_editor.code_search,
-            code_editor.edit_file,
+            code_editor.create,
+            code_editor.str_replace,
+            code_editor.insert,
+            code_editor.undo_edit,
             code_editor.run_python_file,
             code_editor.execute_command,
             code_editor.rm,
-            submit
+            submit,
         ]
 
         llm_with_tools = llm.bind_tools(tools).with_retry(stop_after_attempt=cf.LANGCHAIN_STOP_AFTER_ATTEMPT)
@@ -147,7 +150,7 @@ def run_instance(
             for message in state["messages"]:
                 if isinstance(message, AIMessage):
                     for tc in message.tool_calls:
-                        if tc["name"] == "edit_file":
+                        if tc["name"] in ["edit_file", "str_replace", "insert", "create"]:
                             # stage changed files
                             if (file_path := tc["args"]["file_path"]) not in edited_files:
                                 edited_files.append(file_path)
@@ -165,7 +168,9 @@ def run_instance(
 
         def get_patch(state: CodeReviewerState):
             # unique set of files that were edited and not removed by the agent
-            edited_files = list(set(filter(lambda x: x not in state["removed_files"] + ["reproduce_issue.py"], state["edited_files"])))
+            edited_files = list(set(filter(lambda x: x not in state.get("removed_files", []) + ["reproduce_issue.py"], state["edited_files"])))
+            
+            logger.info(f"Getting patch for files: {edited_files}")
             patch = env.get_patch(edited_files)
             return {"patch": patch}
 

@@ -35,14 +35,22 @@ You will have access to the repo filesystem and a code editor that you can use t
 
 Here is a description of the specific tools that you should use for this task:
 
+Inspection & Search:
 - `open_file(args: file_path, line_number = 1)`: Opens the provided file in a read-only interactive window. If a line_number is provided, you can jump to that specific line, otherwise it will open from the first line. NOTE: If you want to create a new file, use `edit_file` (described below).
 - `scroll_up`: Once a file has been opened, scroll up to reveal lines above the current window.
 - `scroll_down`: Scrolls down in the currently-open window.
 - `ls(args: directory = $REPO_ROOT)`: Lists files in the provided directory (defaults to repo root).
 - `search_files(args: filename, directory = $REPO_ROOT)`: Searches for files with the provided filename. Specify a directory path to narrow your search to a specific folder (otherwise searches all files in the repo).
 - `code_search(args: search_term, path = $REPO_ROOT)`: Searches for any references to the provided search term. In most cases, the search term should either be a class name (e.g. `MyModule`) or function name (e.g. `my_function`). Use the optional `path` argument to restrict your search to a particular folder / file.
-- `edit_file(args: file_path, start_line, end_line, new_content): Edits the file by replacing the code block from start_line to end_line with new_content. Be very careful about spacing, e.g. tabs! Your changes will be passed through a linter to ensure the changes are valid syntax - if this fails, your change will be rejected. If you are creating a completely new file (e.g. to reproduce tests), note that start_line and end_line should both be 1.
+
+File Editing:
+- `create(args: file_path, file_text)`: Creates a new file with contents from file_text.
+- `str_replace(args: file_path, old_str, new_str)`: Edits the file by replacing old_str with new_str. Be very careful about spacing, e.g. tabs!
+- `insert(args: file_path, insert_line, new_str)`: Inserts `new_str` at `insert_line` in the existing file at `file_path`.
+- `undo_edit(args: file_path)`: Undo the last edit to `file_path`. 
 - `rm(args: file_path)`: Deletes a file. Useful for cleanup, e.g. if you created a file to reproduce tests, but now are ready to delete it before submitting your fix.
+
+Execution:
 - `run_python_file(args: file_path)`: Runs a python file at the provided path (under the hood, we're running `python {{file_path}}`). You should only need to execute this on your replicated test, if applicable.
 - `execute_command(args: command)`: Runs a generic terminal command. Only use if you need to configure the environment in order reproduce the issue.
 - `submit`: To submit your changes once you've completed the task.
@@ -51,7 +59,7 @@ Use the following process to resolve the issue:
 
 1. REPRODUCE_ISSUE (optional): In most cases, it will helpful to start by attempting to reproduce the issue. Create and run a new file (e.g. `reproduce_issue.py`) to validate the error. However, note that in some cases it may not be possible to replicate the same environment.
 2. FAULT_LOCALIZATION: Next, identify the problematic file(s), function(s)/class(es), and specific lines of code that cause the bug.  The most important part of this phase is searching the codebase: use `ls`, `search_files`, and `code_search` to narrow down to a specific file / line, then use `open_file`, `scroll_up`, and `scroll_down` to inspect the code in that specific location. NOTE: it's most efficient to use `code_search` first, THEN open the file at that line, THEN scroll as needed. Once you've identified the bug, you're ready for the next step.
-3. REPAIR: Once you've identified the bug, use `edit_file` to edit the file(s) accordingly. It's HIGHLY RECOMMENDED that you keep your edits CONCISE (10 lines or less is ideal), rather than attempting to update large blocks of code.
+3. REPAIR: Once you've identified the bug, use the file editing tools to make the required changes.
 4. VALIDATE: Only applicable if you were able to reproduce the issue during step 1 - otherwise, move directly to CLEANUP. Re-run `run_python_file` on your temporary test file to see if the behavior has been properly fixed. If so, congratulations! You are ready to submit. If not, you may need to go back to FAULT_LOCALIZATION or REPAIR in order to try again.
 5. CLEANUP: You should now delete any files related to reproducing the issue (if applicable) using the `rm` tool. Don't leave any files that you wouldn't want submitted in a PR!
 6. SUBMIT: Finally, use `submit` to let us know you're complete.

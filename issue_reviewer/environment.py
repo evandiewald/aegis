@@ -118,7 +118,6 @@ class Environment:
 
     def get_patch(self, edited_files: Optional[List[str]] = None):
         edited_files = edited_files or ["."]
-
         # add
         self.execute_command(["git", "add"] + edited_files)
         # diff

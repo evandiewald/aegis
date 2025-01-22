@@ -13,6 +13,7 @@ from typing import Tuple, Optional, TypedDict, List
 import os
 import base64
 import re
+from collections import defaultdict
 
 
 class CurrentWindow(TypedDict):
@@ -32,6 +33,9 @@ class Editor:
         self.linter.install(env)
         self.window_buffer = window_buffer
         self.current_window: CurrentWindow | None = None
+
+        # track edit history for "undo" functionality
+        self._file_history = defaultdict(list)
 
     def _file_exists(self, file_path: str) -> bool:
         res = self.env.execute_command(["ls", file_path], ignore_errors=True)
@@ -64,8 +68,57 @@ class Editor:
             return None
         return self.linter.lint(file_path, self.env)
     
-    # todo: maybe an opportunity to revert files or "undo" last action, e.g. if a change was made but it did not resolve the issue?
+    def create(self, file_path: str, file_text: str) -> str:
+        """Create a new file with `file_text` as the contents."""
+        if file_text is None:
+            raise ToolError("Parameter `file_text` is required for command: create")
+        self._write_file(file_path, file_text)
+        self._file_history[file_path].append(file_text)
+        return f"File created successfully at: {file_path}"
+    
+    def insert(self, file_path: str, insert_line: int, new_str: str):
+        """Implement the insert command, which inserts new_str at the specified line in the file content."""
+        if not self._file_exists(file_path):
+            return f"File `{file_path}` does not exist. Use the `create` command to create a new file."
+        
+        file_text = self._read_file(file_path).expandtabs()
+        new_str = new_str.expandtabs()
+        file_text_lines = file_text.split("\n")
+        n_lines_file = len(file_text_lines)
 
+        if insert_line < 0 or insert_line > n_lines_file:
+            raise ValueError(
+                f"Invalid `insert_line` parameter: {insert_line}. It should be within the range of lines of the file: {[0, n_lines_file]}"
+            )
+
+        new_str_lines = new_str.splitlines()
+        new_file_text_lines = (
+            file_text_lines[:insert_line]
+            + new_str_lines
+            + file_text_lines[insert_line:]
+        )
+
+        new_file_text = "\n".join(new_file_text_lines)
+
+        self._write_file(file_path, new_file_text)
+        self._file_history[file_path].append(file_text)
+
+        success_msg = f"The file {file_path} has been edited.\n"
+
+        success_msg += self.view_file(file_path, max(1, insert_line - cf.SNIPPET_LINES + 1), insert_line + len(new_file_text_lines))
+        success_msg += "\nReview the changes and make sure they are as expected (correct indentation, no duplicate lines, etc). Edit the file again if necessary."
+        return success_msg
+    
+    def undo_edit(self, file_path: str):
+        """Implement the undo_edit command."""
+        if not self._file_history[file_path]:
+            return f"No edit history found for {file_path}."
+
+        old_text = self._file_history[file_path].pop()
+        self._write_file(file_path, old_text)
+
+        return f"Last edit to {file_path} undone successfully."
+    
     def search_files(self, filename: str, directory: str = ".") -> str:
         """Searches for files in the given directory with the given filename"""
         results = self.env.execute_command(["find", directory, "-name", filename]).splitlines()
@@ -161,6 +214,59 @@ class Editor:
             return "No file currently open. Use the `open_file(file_path, line_number)` function to open a file first."
         return self.open_file(self.current_window["file_path"], self.current_window["line_number"] + sum(self.window_buffer)-1)
 
+    def str_replace(
+        self,
+        file_path: str,
+        old_str: str,
+        new_str: str,
+    ) -> str:
+        """
+        Replaces old_str with new_str in the file content of file_path.
+        """
+        # Read the file content
+        file_content = self._read_file(file_path).expandtabs()
+        old_str = old_str.expandtabs()
+        new_str = new_str.expandtabs() if new_str is not None else ""
+
+        # Check if old_str is unique in the file
+        occurrences = file_content.count(old_str)
+        if occurrences == 0:
+            raise ValueError(
+                f"No replacement was performed, old_str `{old_str}` did not appear verbatim in {path}."
+            )
+        elif occurrences > 1:
+            file_content_lines = file_content.split("\n")
+            lines = [
+                idx + 1
+                for idx, line in enumerate(file_content_lines)
+                if old_str in line
+            ]
+            raise ValueError(
+                f"No replacement was performed. Multiple occurrences of old_str `{old_str}` in lines {lines}. Please ensure it is unique"
+            )
+
+        # Replace old_str with new_str
+        new_file_content = file_content.replace(old_str, new_str)
+
+        # Write the new content to the file
+        self._write_file(file_path, new_file_content)
+
+        # Save the content to history
+        self._file_history[file_path].append(file_content)
+
+        # Create a snippet of the edited section
+        replacement_line = file_content.split(old_str)[0].count("\n")
+        start_line = max(0, replacement_line - cf.SNIPPET_LINES)
+        end_line = replacement_line + cf.SNIPPET_LINES + new_str.count("\n")
+        snippet = "\n".join(new_file_content.split("\n")[start_line : end_line + 1])
+
+        # Prepare the success message
+        success_msg = f"The file {file_path} has been edited.\n"
+        success_msg += self.view_file(file_path, start_line, end_line)
+        success_msg += "\nReview the changes and make sure they are as expected. Edit the file again if necessary."
+
+        return success_msg
+    
     def edit_file(
         self,
         file_path: str,
