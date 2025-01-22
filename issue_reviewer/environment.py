@@ -31,7 +31,7 @@ class Environment:
         container: Optional[Container] = None,
         docker_client: docker.client.DockerClient = docker.client.from_env(),
         logger: logging.Logger = get_logger(__name__),
-        timeout: int = 30,
+        timeout: int = 60,
     ):
         self.docker = docker_client or docker.client.from_env()
         self.base_image = base_image

@@ -9,7 +9,7 @@ from environment import Environment
 from linter import BaseLinter, Flake8Linter
 import config as cf
 
-from typing import Tuple, Optional, TypedDict
+from typing import Tuple, Optional, TypedDict, List
 import os
 import base64
 import re
@@ -39,6 +39,9 @@ class Editor:
 
     def _read_file(self, file_path: str) -> str:
         return self.env.execute_command(["cat", file_path])
+    
+    def _get_file_lines(self, file_path: str) -> List[str]:
+        return [f"{idx+1}: {line}" for idx, line in enumerate(self._read_file(file_path).splitlines())]
 
     def _write_file(self, file_path: str, content: str, chunk_size: int = 1024):  # 1KB chunks by default
         # First, truncate/create the file
@@ -107,29 +110,30 @@ class Editor:
             res = res + suffix
         return res
     
-    def view_file(self, file_path: str, line_number: int = 1) -> Tuple[str, int]:
+    def view_file(self, file_path: str, start_line: int, end_line: int) -> str:
         """View a file contents without setting the current_window"""
-        file_lines = [f"{idx+1}: {line}" for idx, line in enumerate(self._read_file(file_path).splitlines())]
-        line_number = min(len(file_lines), line_number)
-        start_line = max(0, line_number-self.window_buffer[0])
-        end_line = min(len(file_lines), line_number+self.window_buffer[1])
+        file_lines = self._get_file_lines(file_path)
 
         result = f"Opened file: {file_path}\n"
-        if start_line > 0:
-            result += f"...{start_line} lines above...\n"
-        result += "\n".join(file_lines[start_line:end_line])
+        if start_line > 1:
+            result += f"...{start_line-1} lines above...\n"
+        result += "\n".join(file_lines[max(0, start_line-1):min(end_line, len(file_lines))])
         if end_line < len(file_lines):
             result += f"\n...{len(file_lines)-end_line} lines below..."
         else:
             result += f"\n--You've reached the end of the file--"
-        # return the annotated editor "window" and the adjusted line_number
-        return result, line_number
+        # return the annotated editor "window"
+        return result
 
     def open_file(self, file_path: str, line_number: int = 1) -> str:
         """Opens a file to a specific line. Once open, you can scroll_up or scroll_down"""
         if self._file_exists(file_path):
-            # if line_number > len(file), it will be adjusted accordingly by view_file
-            result, line_number = self.view_file(file_path, line_number)
+            num_lines = len(self._get_file_lines(file_path))
+            # adjust the line_number if needed
+            line_number = min(num_lines, line_number)
+            start_line = max(0, line_number-self.window_buffer[0])
+            end_line = min(num_lines, line_number+self.window_buffer[1])
+            result = self.view_file(file_path, start_line, end_line)
             # set the current window to enable scrolling
             self.current_window = {
                 "file_path": file_path,
@@ -234,11 +238,15 @@ class Editor:
             
 {lint_msg.replace(tmp_file, file_path)}
 
-Here is the relevant portion of code:
+BEFORE attempted edit:
 
-{self.view_file(tmp_file, line_number=start_line)[0]}
+{self.view_file(file_path, start_line - 2, end_line + 2)}
 
-Check your indentation / line numbers and revise with different `new_content`."""
+AFTER attempted edit:
+
+{self.view_file(tmp_file, start_line - 2, end_line + 2)}
+
+Check your indentation & line numbers. You may need to adjust the start_line / end_line if you inadvertently cutoff some text, like a function definition or return statement."""
         else:
             self._write_file(file_path, updated_content)
             return f"File {file_path} {'created' if is_new_file else 'updated'} successfully."
