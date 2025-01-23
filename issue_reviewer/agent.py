@@ -91,7 +91,7 @@ def run_instance(
         logger=logger,
     ) as env:
 
-        code_editor = Editor(env)
+        code_editor = Editor(env, instance=instance_details)
 
         llm = ChatBedrockConverse(
             model=cf.BEDROCK_MODEL_ID,
@@ -120,9 +120,7 @@ def run_instance(
             code_editor.str_replace,
             code_editor.insert,
             code_editor.undo_edit,
-            code_editor.run_python_file,
             code_editor.execute_command,
-            code_editor.rm,
             submit,
         ]
 
@@ -137,7 +135,7 @@ def run_instance(
         def assistant(state: CodeReviewerState):
             
             prompt_template = ChatPromptTemplate([
-                ("system", pt.AGENT_INSTRUCTIONS_NO_REPRODUCE),
+                ("system", pt.AGENT_INSTRUCTIONS_USE_EXISTING_TESTS),
                 MessagesPlaceholder("messages")
             ])
 

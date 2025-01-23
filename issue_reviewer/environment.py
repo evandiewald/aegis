@@ -17,6 +17,8 @@ import docker
 from docker.models.containers import Container
 from swebench.harness.docker_build import build_container, build_env_images, build_instance_image
 from swebench.harness.test_spec.test_spec import TestSpec
+from swebench.harness.constants.python import MAP_REPO_VERSION_TO_SPECS_PY
+from swebench.harness.docker_build import build_container
 from typing import List, Self, Union, Optional
 from exceptions import CommandFailedException
 import logging
@@ -47,6 +49,7 @@ class Environment:
     def from_test_spec(cls, test_spec: TestSpec, run_id: str, **kwargs) -> Self:
         docker_client = kwargs.pop("docker_client", docker.client.from_env())
         logger = kwargs.pop("logger", get_logger(__name__))
+        workdir = kwargs.pop("workdir", "/testbed")
 
         if test_spec.get_instance_container_name(run_id) in [c.name for c in docker_client.containers.list(all=True)]:
             logger.info(f"Container {test_spec.get_instance_container_name(run_id)} already exists. Removing and re-creating.")
@@ -56,15 +59,33 @@ class Environment:
         cap_add = run_args.get("cap_add", [])
 
         logger.info(f"Running container: {test_spec.get_instance_container_name(run_id)}")
-        container = docker_client.containers.run(
-            image=test_spec.instance_image_key,
-            command="tail -f /dev/null",
-            name=test_spec.get_instance_container_name(run_id),
-            detach=True,
-            tty=True,
-            stdin_open=True,
-            platform=test_spec.platform,
-            cap_add=cap_add,
+        container = build_container(
+            test_spec, docker_client, run_id, logger, nocache=False,
+        )
+
+        
+        logger.info("Starting container")
+        # container.exec_run(
+        #     test_spec.setup_env_script,
+        #     workdir=workdir,
+        # )
+        container.start()
+
+        # pre_install
+        logger.info("Running pre_install scripts")
+        pre_install_script = MAP_REPO_VERSION_TO_SPECS_PY[test_spec.repo][test_spec.version].get("pre_install")
+        if pre_install_script:
+            container.exec_run(
+                pre_install_script,
+                workdir=workdir,
+            )
+
+        # install
+        logger.info("Running install scripts")
+        install_script = MAP_REPO_VERSION_TO_SPECS_PY[test_spec.repo][test_spec.version].get("install")
+        container.exec_run(
+            install_script,
+            workdir=workdir,
         )
 
         return cls(
@@ -109,7 +130,7 @@ class Environment:
         if exit_code == 124:
             output += f"\nCommand timed out after {timeout} seconds."
         # return output
-        if exit_code != 0 and not ignore_errors:
+        if exit_code != 0 and ignore_errors is False:
             raise CommandFailedException(command, output)
         return output
 
@@ -122,3 +143,4 @@ class Environment:
         self.execute_command(["git", "add"] + edited_files)
         # diff
         return self.execute_command(["git", "diff", "--cached"] + edited_files)
+    

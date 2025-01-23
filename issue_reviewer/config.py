@@ -5,7 +5,7 @@ MAX_FILE_SEARCH_RESULTS = 20
 # number of lines above and below the focus line to show in the editor view
 WINDOW_BUFFER = (5, 95)
 
-RECURSION_LIMIT = 40
+RECURSION_LIMIT = 30
 
 # max output lines when running a python file
 MAX_OUTPUT_LINES = 50

@@ -8,8 +8,14 @@ Constructed from the Environment class
 from environment import Environment
 from linter import BaseLinter, Flake8Linter
 import config as cf
+from swebench.harness.constants.constants import SWEbenchInstance
 
-from typing import Tuple, Optional, TypedDict, List
+from swebench_utils import get_test_script
+
+from testbeds.swebench.log_parsers import parse_log
+from testbeds.schema import TestResult
+
+from typing import Tuple, Optional, TypedDict, List, Dict
 import os
 import base64
 import re
@@ -25,10 +31,12 @@ class Editor:
     def __init__(
         self,
         env: Environment,
+        instance: SWEbenchInstance,
         linter: Optional[BaseLinter] = Flake8Linter(),
         window_buffer: Tuple[int, int] = cf.WINDOW_BUFFER,
     ):
         self.env = env
+        self.instance = instance
         self.linter = linter
         self.linter.install(env)
         self.window_buffer = window_buffer
@@ -36,6 +44,93 @@ class Editor:
 
         # track edit history for "undo" functionality
         self._file_history = defaultdict(list)
+
+        self._test_files: List[str] = []
+
+    def _add_test_file(self, file_path: str):
+        """
+        # adapted from https://github.com/aorwall/moatless-tools/blob/main/moatless/index/code_index.py#L576
+        Find the test file related to the provided file path.
+
+        Test files should match the pattern "test_[filename].py" or "[filename]_test.py".
+        If there are multiple matches, the one with the most similar directory path is picked.
+        """
+        filename = os.path.basename(file_path)
+        stem = filename.split(".")[0]
+        dirname = os.path.dirname(file_path)
+        test_patterns = [f"*test_{filename}", f"*{stem}_test.py", f"*{stem}/tests.py"]  # last one is for django
+
+        # if this is already a test file, add it directly
+        if "test" in file_path and file_path not in self._test_files:
+            self._test_files.append(file_path)
+        
+        else:
+            matched_files = [] 
+            for pat in test_patterns:
+                matched_files += self._find_files(pat)
+            if not matched_files:
+                test_file = None
+
+            if len(matched_files) == 1:
+                test_file = matched_files[0]
+
+            else:
+
+                # Find the test file with the most similar directory path
+                best_match = None
+                best_match_score = float("inf")
+                for test_file in matched_files:
+                    test_dirname = os.path.dirname(test_file)
+                    common_prefix = os.path.commonprefix([dirname, test_dirname])
+                    score = len(dirname) - len(common_prefix)
+                    if score < best_match_score:
+                        best_match = test_file
+                        best_match_score = score
+
+                test_file = best_match
+
+            if test_file not in self._test_files and test_file is not None:
+                self._test_files.append(test_file)
+        return self._test_files
+
+    def add_test_file(self, test_file: str):
+        """Explicitly add a test_file to be run automatically when edits are made."""
+        if not self._file_exists(test_file):
+            raise ValueError(f"Test file {test_file} does not exist!")
+        if test_file in self._test_files:
+            return f"Test file {test_file} already in test_files."
+        self._test_files.append(test_file)
+        test_results = self.run_tests()
+        return f"Test file {test_file} added successfully.\n\n{test_results}\n"
+
+    def _get_test_summary(self, test_result: Dict[str, List[TestResult]]) -> str:
+        
+        passed = [tr for test_file in test_result for tr in test_result[test_file] if tr.status == "PASSED"]
+        failed = [tr for test_file in test_result for tr in test_result[test_file] if tr.status != "PASSED"]
+        summary = ("Summary of Test Results:\n"
+                   f"Test Files: {list(test_result.keys())}\n"
+                   f"{len(passed)} passed\n"
+                   f"{len(failed)} failed\n\n")
+        
+        if failed:
+            summary += "Errors:\n\n"
+            for failed_res in failed[:5]:
+                summary += "-" * 10 + failed_res.name + "-" * 10
+                if failed_res.failure_output:
+                    failure_trimmed = "\n".join(failed_res.failure_output.splitlines()[:10]) + "\n...(output trimmed)..."
+                    summary += f"\n\n{failure_trimmed}\n\n"
+
+        return summary
+
+    def run_tests(self, test_files: Optional[List[str]] = None) -> Dict[str, List[TestResult]]:
+        """Runs tests for file paths at self._test_files"""
+        test_files = test_files or self._test_files
+        result = {}
+        for test_file in test_files:
+            test_command = ["conda", "run", "-n", "testbed"] + get_test_script(self.instance, [test_file])
+            test_output = self.env.execute_command(test_command, ignore_errors=True)
+            result[test_file] = parse_log(test_output, self.instance["repo"])
+        return self._get_test_summary(result)
 
     def _file_exists(self, file_path: str) -> bool:
         res = self.env.execute_command(["ls", file_path], ignore_errors=True)
@@ -71,10 +166,18 @@ class Editor:
     def create(self, file_path: str, file_text: str) -> str:
         """Create a new file with `file_text` as the contents."""
         if file_text is None:
-            raise ToolError("Parameter `file_text` is required for command: create")
+            raise ValueError("Parameter `file_text` is required for command: create")
         self._write_file(file_path, file_text)
         self._file_history[file_path].append(file_text)
-        return f"File created successfully at: {file_path}"
+
+        success_msg = f"File created successfully at: {file_path}"
+
+        # run tests
+        self._add_test_file(file_path)
+        test_results = self.run_tests()
+        success_msg += f"\n\n{test_results}"
+
+        return success_msg
     
     def insert(self, file_path: str, insert_line: int, new_str: str):
         """Implement the insert command, which inserts new_str at the specified line in the file content."""
@@ -107,6 +210,12 @@ class Editor:
 
         success_msg += self.view_file(file_path, max(1, insert_line - cf.SNIPPET_LINES + 1), insert_line + len(new_file_text_lines))
         success_msg += "\nReview the changes and make sure they are as expected (correct indentation, no duplicate lines, etc). Edit the file again if necessary."
+        
+        # run tests
+        self._add_test_file(file_path)
+        test_results = self.run_tests()
+        success_msg += f"\n\n{test_results}"
+
         return success_msg
     
     def undo_edit(self, file_path: str):
@@ -119,21 +228,24 @@ class Editor:
 
         return f"Last edit to {file_path} undone successfully."
     
-    def search_files(self, filename: str, directory: str = ".") -> str:
-        """Searches for files in the given directory with the given filename"""
-        results = self.env.execute_command(["find", directory, "-name", filename]).splitlines()
+    def _find_files(self, path_pattern: str, directory: str = ".") -> List[str]:
+        return [p[len("./"):] for p in self.env.execute_command(["find", directory, "-path", path_pattern]).splitlines() if p.startswith("./")]
+    
+    def search_files(self, path_pattern: str, directory: str = ".") -> str:
+        """Searches for files in the given directory with the given path_pattern"""
+        results = self._find_files(path_pattern, directory)
         num_results = len(results)
         if num_results == 0:
             # expand the search
-            results = self.env.execute_command(["find", directory, "-name", f"*{filename}"]).splitlines()
+            results = self._find_files(f"*{path_pattern}", directory)
             num_results = len(results)
         # if still nothing
         if num_results == 0:
-            return f"No results found for file {filename} in directory {directory}"
+            return f"No results found for path_pattern {path_pattern} in directory {directory}"
         elif num_results == 1:
-            return f"Found file {filename} in directory {directory}: {results[0]}"
+            return f"Found file: {results[0]}"
         else:
-            res = (f"Found {num_results} files matching {filename} in directory {directory}:\n" +
+            res = (f"Found {num_results} files matching {path_pattern} in directory {directory}:\n" +
                     "\n".join(results[:cf.MAX_FILE_SEARCH_RESULTS]))
             suffix = f"\n...{num_results-cf.MAX_FILE_SEARCH_RESULTS} more (try narrowing your search)" \
                 if num_results > cf.MAX_FILE_SEARCH_RESULTS else ""
@@ -141,7 +253,8 @@ class Editor:
                     
     def code_search(self, search_term: str, path: str = "."):
         """
-        Returns references of a specific term (e.g. a class or function).
+        Returns explicit references of a specific term (grep-style).
+        If you are looking for the instantiation of a class/function, use the appropriate prefix to get the most direct result, e.g. `def my_function` or `class MyClass`.
         Use optional `path` to narrow search to a particular folder/file.
         """
         # todo: support other languages - treesitter?
@@ -178,8 +291,11 @@ class Editor:
         # return the annotated editor "window"
         return result
 
-    def open_file(self, file_path: str, line_number: int = 1) -> str:
-        """Opens a file to a specific line. Once open, you can scroll_up or scroll_down"""
+    def open_file(self, file_path: str, line_number: int) -> str:
+        """
+        Opens a file to a specific line. Once open, you can scroll_up or scroll_down. 
+        It's highly recommended that you run `code_search` before using this tool, in order to locate the specific line you're looking for.
+        """
         if self._file_exists(file_path):
             num_lines = len(self._get_file_lines(file_path))
             # adjust the line_number if needed
@@ -232,7 +348,7 @@ class Editor:
         occurrences = file_content.count(old_str)
         if occurrences == 0:
             raise ValueError(
-                f"No replacement was performed, old_str `{old_str}` did not appear verbatim in {path}."
+                f"No replacement was performed, `old_str` did not appear verbatim in {file_path}. You may want to view the file again."
             )
         elif occurrences > 1:
             file_content_lines = file_content.split("\n")
@@ -251,19 +367,22 @@ class Editor:
         # Write the new content to the file
         self._write_file(file_path, new_file_content)
 
-        # Save the content to history
+        # Save the content to history and add relevant test file
         self._file_history[file_path].append(file_content)
 
         # Create a snippet of the edited section
         replacement_line = file_content.split(old_str)[0].count("\n")
         start_line = max(0, replacement_line - cf.SNIPPET_LINES)
         end_line = replacement_line + cf.SNIPPET_LINES + new_str.count("\n")
-        snippet = "\n".join(new_file_content.split("\n")[start_line : end_line + 1])
 
         # Prepare the success message
         success_msg = f"The file {file_path} has been edited.\n"
         success_msg += self.view_file(file_path, start_line, end_line)
         success_msg += "\nReview the changes and make sure they are as expected. Edit the file again if necessary."
+
+        self._add_test_file(file_path)
+        test_results = self.run_tests()
+        success_msg += f"\n\n{test_results}"
 
         return success_msg
     
