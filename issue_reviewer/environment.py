@@ -63,7 +63,6 @@ class Environment:
             test_spec, docker_client, run_id, logger, nocache=False,
         )
 
-        
         logger.info("Starting container")
         # container.exec_run(
         #     test_spec.setup_env_script,
@@ -120,10 +119,10 @@ class Environment:
         workdir = kwargs.pop("workdir", self.workdir)
         timeout = kwargs.pop("timeout", self.timeout)
         # run command in docker
-        if isinstance(command, str):
-            command = f"timeout {timeout} {command}"
-        elif isinstance(command, list):
-            command = ["timeout", f"{timeout}"] + command
+        # if isinstance(command, str):
+        #     command = f"timeout {timeout} {command}"
+        # elif isinstance(command, list):
+        #     command = ["timeout", f"{timeout}"] + command
         exit_code, output_bytes = self.container.exec_run(command, workdir=workdir, **kwargs)
         output = output_bytes.decode("utf-8")
         # check for timeouts

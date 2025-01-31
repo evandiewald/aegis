@@ -6,6 +6,7 @@ Constructed from the Environment class
 
 """
 from environment import Environment
+from code_index import CodeIndex
 from linter import BaseLinter, Flake8Linter
 import config as cf
 from swebench.harness.constants.constants import SWEbenchInstance
@@ -15,7 +16,7 @@ from swebench_utils import get_test_script
 from testbeds.swebench.log_parsers import parse_log
 from testbeds.schema import TestResult
 
-from typing import Tuple, Optional, TypedDict, List, Dict
+from typing import Tuple, Optional, TypedDict, List, Dict, Literal
 import os
 import base64
 import re
@@ -32,10 +33,12 @@ class Editor:
         self,
         env: Environment,
         instance: SWEbenchInstance,
+        code_index: CodeIndex,
         linter: Optional[BaseLinter] = Flake8Linter(),
         window_buffer: Tuple[int, int] = cf.WINDOW_BUFFER,
     ):
         self.env = env
+        self.code_index = code_index
         self.instance = instance
         self.linter = linter
         self.linter.install(env)
@@ -47,51 +50,28 @@ class Editor:
 
         self._test_files: List[str] = []
 
+    def _format_docs(self, docs: List[Dict]) -> str:
+        result_str = ""
+        for doc in docs:
+            window = self.view_file(doc['file_path'], doc['start_line']-1, doc['end_line']+1)
+            result_str += (f"<code_block_id='{doc['name']}'>\n\n{window}\n\n")
+
+        return result_str
+
     def _add_test_file(self, file_path: str):
-        """
-        # adapted from https://github.com/aorwall/moatless-tools/blob/main/moatless/index/code_index.py#L576
-        Find the test file related to the provided file path.
+        test_file = self.code_index.get_most_similar_test_file(file_path)
 
-        Test files should match the pattern "test_[filename].py" or "[filename]_test.py".
-        If there are multiple matches, the one with the most similar directory path is picked.
-        """
-        filename = os.path.basename(file_path)
-        stem = filename.split(".")[0]
-        dirname = os.path.dirname(file_path)
-        test_patterns = [f"*test_{filename}", f"*{stem}_test.py", f"*{stem}/tests.py"]  # last one is for django
-
-        # if this is already a test file, add it directly
-        if "test" in file_path and file_path not in self._test_files:
-            self._test_files.append(file_path)
-        
-        else:
-            matched_files = [] 
-            for pat in test_patterns:
-                matched_files += self._find_files(pat)
-            if not matched_files:
-                test_file = None
-
-            if len(matched_files) == 1:
-                test_file = matched_files[0]
-
-            else:
-
-                # Find the test file with the most similar directory path
-                best_match = None
-                best_match_score = float("inf")
-                for test_file in matched_files:
-                    test_dirname = os.path.dirname(test_file)
-                    common_prefix = os.path.commonprefix([dirname, test_dirname])
-                    score = len(dirname) - len(common_prefix)
-                    if score < best_match_score:
-                        best_match = test_file
-                        best_match_score = score
-
-                test_file = best_match
-
-            if test_file not in self._test_files and test_file is not None:
-                self._test_files.append(test_file)
+        if test_file not in self._test_files and test_file is not None:
+            self._test_files.append(test_file)
         return self._test_files
+    
+    def code_search_formatted_docs(self, query: str, category: Literal["tests", "src"] = "src") -> str:
+        docs = self.code_index.code_search(query, category, cf.RETRIEVE_K_DOCS)
+        return self._format_docs(docs)
+    
+    def get_docs_by_name(self, doc_ids: List[str]) -> str:
+        docs = self.code_index.get_docs_by_name(doc_ids)
+        return self._format_docs(docs)
 
     def add_test_file(self, test_file: str):
         """Explicitly add a test_file to be run automatically when edits are made."""
@@ -117,8 +97,13 @@ class Editor:
             for failed_res in failed[:5]:
                 summary += "-" * 10 + failed_res.name + "-" * 10
                 if failed_res.failure_output:
-                    failure_trimmed = "\n".join(failed_res.failure_output.splitlines()[:10]) + "\n...(output trimmed)..."
-                    summary += f"\n\n{failure_trimmed}\n\n"
+                    # trim the output if necessary
+                    failure_output_lines = failed_res.failure_output.splitlines()
+                    if len(failure_output_lines) > 40:
+                        failure_msg = "\n".join(failure_output_lines[:20]) + "\n...(output trimmed)..." + "\n".join(failure_output_lines[-20:])
+                    else:
+                        failure_msg = "\n".join(failure_output_lines)
+                    summary += f"\n\n{failure_msg}\n\n"
 
         return summary
 
@@ -208,7 +193,7 @@ class Editor:
 
         success_msg = f"The file {file_path} has been edited.\n"
 
-        success_msg += self.view_file(file_path, max(1, insert_line - cf.SNIPPET_LINES + 1), insert_line + len(new_file_text_lines))
+        success_msg += self.view_file(file_path, max(1, insert_line - cf.SNIPPET_LINES + 1), min(insert_line + len(new_str_lines) + cf.SNIPPET_LINES, len(new_file_text_lines)))
         success_msg += "\nReview the changes and make sure they are as expected (correct indentation, no duplicate lines, etc). Edit the file again if necessary."
         
         # run tests
@@ -251,7 +236,7 @@ class Editor:
                 if num_results > cf.MAX_FILE_SEARCH_RESULTS else ""
             return res + suffix
                     
-    def code_search(self, search_term: str, path: str = "."):
+    def explicit_search(self, search_term: str, path: str = "."):
         """
         Returns explicit references of a specific term (grep-style).
         If you are looking for the instantiation of a class/function, use the appropriate prefix to get the most direct result, e.g. `def my_function` or `class MyClass`.

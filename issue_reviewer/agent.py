@@ -7,6 +7,7 @@ from datasets import load_dataset
 
 from environment import Environment
 from editor import Editor
+from code_index import CodeIndex
 from swebench.harness.test_spec.test_spec import make_test_spec
 from swebench.harness.constants.constants import SWEbenchInstance
 from utils import get_logger
@@ -23,7 +24,8 @@ import config as cf
 
 from dotenv import load_dotenv
 from botocore.config import Config
-from typing import Annotated, List, Dict, Optional
+from typing import Annotated, List, Dict, Optional, Literal
+from pydantic import BaseModel
 import operator
 import logging
 import time
@@ -91,7 +93,8 @@ def run_instance(
         logger=logger,
     ) as env:
 
-        code_editor = Editor(env, instance=instance_details)
+        code_index = CodeIndex(instance_details)
+        code_editor = Editor(env, instance=instance_details, code_index=code_index)
 
         llm = ChatBedrockConverse(
             model=cf.BEDROCK_MODEL_ID,
@@ -105,26 +108,57 @@ def run_instance(
             temperature=cf.MODEL_TEMPERATURE,
         )
 
-        def submit():
-            """Submit your changes once complete."""
-            pass
+        llm_light = ChatBedrockConverse(
+            model=cf.BEDROCK_MODEL_ID_LIGHT,
+            config=Config(
+                retries={
+                    "mode": "adaptive",
+                    "max_attempts": cf.BOTO3_MAX_ATTEMPTS,
+                },
+            ),
+            region_name=os.getenv("AWS_REGION", "us-east-1"),
+            temperature=cf.MODEL_TEMPERATURE,
+        )
+
+        class CodeBlockIds(BaseModel):
+            """code_block_id's relevant to the search query"""
+            code_block_ids: List[str]
+
+        def semantic_search(query: str, category: Literal["src", "tests"] = "src") -> str:
+            """Search the codebase for relevant code blocks pertaining to the provided query. Use the `category` argument to differentiate between source / implementation code (`src`) and test code (`tests`). `src` is the default."""
+            llm_light_with_structure = llm_light.with_structured_output(CodeBlockIds)
+
+            code_blocks = code_editor.code_search_formatted_docs(query, category)
+
+            prompt = pt.CODE_SEARCH.format(query=query, code_blocks=code_blocks)
+
+            code_block_ids = llm_light_with_structure.invoke(prompt).code_block_ids
+
+            return code_editor.get_docs_by_name(code_block_ids)
+
+        def submit(reason: str):
+            """Submit your changes once complete. Provide a reason for submitting"""
+            logger.info(f"SUBMITTED WITH REASON:\n\n{reason}")
 
         tools = [
+            semantic_search,
+            code_editor.explicit_search,
             code_editor.open_file,
             code_editor.scroll_up,
             code_editor.scroll_down,
-            code_editor.ls,
+            # code_editor.ls,
             code_editor.search_files,
-            code_editor.code_search,
             code_editor.create,
             code_editor.str_replace,
             code_editor.insert,
             code_editor.undo_edit,
-            code_editor.execute_command,
+            # code_editor.execute_command,
             submit,
         ]
 
-        llm_with_tools = llm.bind_tools(tools).with_retry(stop_after_attempt=cf.LANGCHAIN_STOP_AFTER_ATTEMPT)
+        llm_with_tools = llm.bind_tools(
+            tools, tool_choice="any"
+        ).with_retry(stop_after_attempt=cf.LANGCHAIN_STOP_AFTER_ATTEMPT)
 
         class CodeReviewerState(MessagesState):
             patch: str
