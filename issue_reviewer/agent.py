@@ -13,6 +13,7 @@ from swebench.harness.constants.constants import SWEbenchInstance
 from utils import get_logger
 
 from langchain_aws import ChatBedrockConverse
+from langchain_openai import ChatOpenAI
 from langgraph.prebuilt.tool_node import ToolNode
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langchain_core.messages import HumanMessage, AIMessage
@@ -49,6 +50,7 @@ def parse_args():
     parser.add_argument("--run-id", type=str, required=True)
     parser.add_argument("--max-workers", type=int, default=os.cpu_count())
     parser.add_argument("--start-from-idx", type=int)
+    parser.add_argument("--model", type=str, default="anthropic")
     parser.add_argument("--recursion-limit", type=int, default=cf.RECURSION_LIMIT)
     return parser.parse_args()
 
@@ -96,17 +98,27 @@ def run_instance(
         code_index = CodeIndex(instance_details)
         code_editor = Editor(env, instance=instance_details, code_index=code_index)
 
-        llm = ChatBedrockConverse(
-            model=cf.BEDROCK_MODEL_ID,
-            config=Config(
-                retries={
-                    "mode": "adaptive",
-                    "max_attempts": cf.BOTO3_MAX_ATTEMPTS,
-                },
-            ),
-            region_name=os.getenv("AWS_REGION", "us-east-1"),
-            temperature=cf.MODEL_TEMPERATURE,
-        )
+        if args.model == "anthropic":
+            llm = ChatBedrockConverse(
+                model=cf.BEDROCK_MODEL_ID,
+                config=Config(
+                    retries={
+                        "mode": "adaptive",
+                        "max_attempts": cf.BOTO3_MAX_ATTEMPTS,
+                    },
+                ),
+                region_name=os.getenv("AWS_REGION", "us-east-1"),
+                temperature=cf.MODEL_TEMPERATURE,
+            )
+            system_prompt = pt.AGENT_INSTRUCTIONS_USE_EXISTING_TESTS
+        elif args.model == "openai":
+            llm = ChatOpenAI(
+                model=cf.OPENAI_MODEL_ID,
+                reasoning_effort="high",
+            )
+            system_prompt = pt.AGENT_INSTRUCTIONS_REASONING_MODEL
+        else:
+            raise ValueError(f"Unknown model {args.model}")
 
         llm_light = ChatBedrockConverse(
             model=cf.BEDROCK_MODEL_ID_LIGHT,
@@ -124,11 +136,14 @@ def run_instance(
             """code_block_id's relevant to the search query"""
             code_block_ids: List[str]
 
-        def semantic_search(query: str, category: Literal["src", "tests"] = "src") -> str:
-            """Search the codebase for relevant code blocks pertaining to the provided query. Use the `category` argument to differentiate between source / implementation code (`src`) and test code (`tests`). `src` is the default."""
+        def semantic_search(query: str, category: Literal["src", "tests"] = "src", type: Optional[Literal["function", "class"]] = None) -> str:
+            """Search the codebase for relevant code blocks pertaining to the provided query. 
+            Use the `category` argument to differentiate between source / implementation code (`src`) and test code (`tests`). `src` is the default.
+            Use the optional `type` argument (must be either `function` or `class`) to filter to only code blocks of that type. 
+            If `type` is unspecified, all relevant blocks will be returned."""
             llm_light_with_structure = llm_light.with_structured_output(CodeBlockIds)
 
-            code_blocks = code_editor.code_search_formatted_docs(query, category)
+            code_blocks = code_editor.code_search_formatted_docs(query, category, type)
 
             prompt = pt.CODE_SEARCH.format(query=query, code_blocks=code_blocks)
 
@@ -148,17 +163,15 @@ def run_instance(
             code_editor.scroll_down,
             # code_editor.ls,
             code_editor.search_files,
-            code_editor.create,
+            # code_editor.create,
             code_editor.str_replace,
             code_editor.insert,
-            code_editor.undo_edit,
+            # code_editor.undo_edit,
             # code_editor.execute_command,
             submit,
         ]
 
-        llm_with_tools = llm.bind_tools(
-            tools, tool_choice="any"
-        ).with_retry(stop_after_attempt=cf.LANGCHAIN_STOP_AFTER_ATTEMPT)
+        llm_with_tools = llm.bind_tools(tools).with_retry(stop_after_attempt=cf.LANGCHAIN_STOP_AFTER_ATTEMPT)
 
         class CodeReviewerState(MessagesState):
             patch: str
@@ -169,7 +182,7 @@ def run_instance(
         def assistant(state: CodeReviewerState):
             
             prompt_template = ChatPromptTemplate([
-                ("system", pt.AGENT_INSTRUCTIONS_USE_EXISTING_TESTS),
+                ("system", system_prompt),
                 MessagesPlaceholder("messages")
             ])
 
@@ -210,8 +223,10 @@ def run_instance(
             last_message = state["messages"][-1]
             if last_message and "submit" in [t.get("name") for t in last_message.tool_calls]:
                 return "get_patch"  # Route to end
-            else:
+            elif last_message and len(last_message.tool_calls) > 0:
                 return "tool_node"  # Route back to tool node
+            else:
+                return "assistant"
 
         workflow = StateGraph(CodeReviewerState)
 

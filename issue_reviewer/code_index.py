@@ -333,9 +333,9 @@ class CodeIndex:
         query_vec = embed_cohere([src_file_path])
         return self.db_test_files._collection.query(query_vec, n_results=1)["documents"][0][0]
 
-    def code_search(self, query: str, category: Literal["tests", "src"], n_results: int = cf.RETRIEVE_K_DOCS) -> List[Document]:
+    def code_search(self, query: str, category: Literal["tests", "src"], type: Optional[Literal["function", "class"]] = None, n_results: int = cf.RETRIEVE_K_DOCS) -> List[Document]:
         query_vec = embed_cohere([query])
-        where = {"category": category}
+        where = {"$and": [{"category": category}, {"type": type}]} if type else {"category": category}
         return self.db._collection.query(query_vec, n_results=n_results, where=where)["metadatas"][0]
     
     def code_search_formatted_docs(self, query: str, category: Literal["tests", "src"], n_results: int = cf.RETRIEVE_K_DOCS) -> str:

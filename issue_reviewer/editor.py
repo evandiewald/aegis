@@ -65,8 +65,8 @@ class Editor:
             self._test_files.append(test_file)
         return self._test_files
     
-    def code_search_formatted_docs(self, query: str, category: Literal["tests", "src"] = "src") -> str:
-        docs = self.code_index.code_search(query, category, cf.RETRIEVE_K_DOCS)
+    def code_search_formatted_docs(self, query: str, category: Literal["tests", "src"] = "src", type: Optional[Literal["function", "class"]] = None) -> str:
+        docs = self.code_index.code_search(query, category, type, cf.RETRIEVE_K_DOCS)
         return self._format_docs(docs)
     
     def get_docs_by_name(self, doc_ids: List[str]) -> str:
